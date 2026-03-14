@@ -535,8 +535,8 @@ export async function cloneTransactions(
       }
     } else {
       try {
-        const resp = await client.transactions.createTransactions(destBudgetId, {
-          transactions: batch.map((b) => b.payload as ynab.SaveTransaction),
+        const resp = await client.transactions.createTransaction(destBudgetId, {
+          transactions: batch.map((b) => b.payload as ynab.NewTransaction),
         })
 
         const created = resp.data.transactions ?? []
