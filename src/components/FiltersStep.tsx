@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { format, subDays, subMonths } from 'date-fns'
+import { format, subDays } from 'date-fns'
 import { Loader2, ArrowLeft } from 'lucide-react'
 import type * as ynab from 'ynab'
 import { Button } from '@/components/ui/button'
