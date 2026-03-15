@@ -16,7 +16,7 @@ import { CsvUploadStep } from '@/components/CsvUploadStep'
 import { getToken, clearToken, getFilters, getPrimaryBudgetId, setPrimaryBudgetId as savePrimaryBudgetId, clearPrimaryBudgetId } from '@/lib/storage'
 import { cloneTransactions, cloneFromCsv } from '@/lib/cloner'
 import type { Budget } from '@/lib/ynabApi'
-import type { CloneResult, CsvFilterPreferences, FilterPreferences, PreflightResult, SourceMode } from '@/lib/types'
+import type { CategoryOverrides, CloneResult, CsvFilterPreferences, FilterPreferences, PreflightResult, SourceMode } from '@/lib/types'
 import type { CsvTransaction } from '@/lib/csvParser'
 
 type Step =
@@ -125,7 +125,7 @@ export default function App() {
   }
 
   // ── Clone (API) ──────────────────────────────────────────────────────────────
-  async function handleClone(_preflightResult: PreflightResult) {
+  async function handleClone(_preflightResult: PreflightResult, overrides: CategoryOverrides) {
     setCloneProgress({ done: 0, total: 0 })
     setStep('cloning')
     try {
@@ -136,6 +136,7 @@ export default function App() {
         filters,
         dryRun,
         (done, total) => setCloneProgress({ done, total }),
+        overrides,
       )
       setCloneResult(result)
       setStep('result')
@@ -147,7 +148,7 @@ export default function App() {
   }
 
   // ── Clone (CSV) ──────────────────────────────────────────────────────────────
-  async function handleCsvClone(_preflightResult: PreflightResult) {
+  async function handleCsvClone(_preflightResult: PreflightResult, overrides: CategoryOverrides) {
     setCloneProgress({ done: 0, total: 0 })
     setStep('cloning')
     try {
@@ -158,6 +159,7 @@ export default function App() {
         csvFilters,
         dryRun,
         (done, total) => setCloneProgress({ done, total }),
+        overrides,
       )
       setCloneResult(result)
       setStep('result')

@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
-import { CheckCircle2, XCircle, AlertTriangle, Loader2, ArrowLeft } from 'lucide-react'
+import { CheckCircle2, XCircle, AlertTriangle, Loader2, ArrowLeft, ChevronDown } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { preflightFromCsv } from '@/lib/cloner'
-import type { CsvFilterPreferences, PreflightResult } from '@/lib/types'
+import type { CategoryOverrides, CsvFilterPreferences, DestinationCategory, PreflightResult } from '@/lib/types'
 import type { CsvTransaction } from '@/lib/csvParser'
 
 interface Props {
@@ -15,7 +15,7 @@ interface Props {
   csvTransactions: CsvTransaction[]
   filters: CsvFilterPreferences
   dryRun: boolean
-  onClone: (result: PreflightResult) => void
+  onClone: (result: PreflightResult, overrides: CategoryOverrides) => void
   onBack: () => void
 }
 
@@ -31,10 +31,12 @@ export function CsvPreflightStep({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<PreflightResult | null>(null)
+  const [overrides, setOverrides] = useState<CategoryOverrides>({})
 
   useEffect(() => {
     setLoading(true)
     setError(null)
+    setOverrides({})
     preflightFromCsv(token, destBudgetId, csvTransactions, filters)
       .then(setResult)
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
@@ -42,7 +44,33 @@ export function CsvPreflightStep({
   }, [token, destBudgetId, csvTransactions, filters])
 
   const unmatchedAccounts = result?.accountMatches.filter((m) => !m.destinationAccountId) ?? []
-  const unmatchedCategories = result?.categoryMatches.filter((m) => !m.destinationCategoryId) ?? []
+
+  // Calculate effective will-copy count incorporating overrides
+  const overriddenKeys = new Set(Object.keys(overrides))
+  const additionalFromOverrides = result
+    ? result.skippedTransactionSummary
+        .filter(s => s.reason === 'no_category_match' && overriddenKeys.has(
+          `${result.categoryMatches.find(m => m.sourceCategoryName === s.categoryName)
+            ? result.categoryMatches.find(m => m.sourceCategoryName === s.categoryName)!.sourceGroupName.trim().toLowerCase() + '/' + s.categoryName.trim().toLowerCase()
+            : ''}`
+        ))
+        .reduce((sum, s) => sum + s.count, 0)
+    : 0
+
+  const effectiveWillCopy = (result?.willCopyCount ?? 0) + additionalFromOverrides
+  const effectiveWillSkip = (result?.willSkipCount ?? 0) - additionalFromOverrides
+
+  function handleOverrideChange(categoryKey: string, destCategoryId: string) {
+    setOverrides(prev => {
+      const next = { ...prev }
+      if (destCategoryId) {
+        next[categoryKey] = destCategoryId
+      } else {
+        delete next[categoryKey]
+      }
+      return next
+    })
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 p-4 pb-12">
@@ -97,12 +125,11 @@ export function CsvPreflightStep({
         {result && (
           <>
             {/* Summary stats */}
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-              <StatCard label="Will copy" value={result.willCopyCount} color="green" />
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <StatCard label="Will copy" value={effectiveWillCopy} color="green" />
               <StatCard label="Native Transfers" value={result.transferCount} color="blue" />
-              <StatCard label="Will skip" value={result.willSkipCount} color="amber" />
+              <StatCard label="Will skip" value={effectiveWillSkip} color="amber" />
               <StatCard label="Accounts unmatched" value={unmatchedAccounts.length} color={unmatchedAccounts.length > 0 ? 'red' : 'green'} />
-              <StatCard label="Categories unmatched" value={unmatchedCategories.length} color={unmatchedCategories.length > 0 ? 'amber' : 'green'} />
             </div>
 
             {/* Account matches */}
@@ -153,7 +180,7 @@ export function CsvPreflightStep({
               </CardContent>
             </Card>
 
-            {/* Category matches */}
+            {/* Category matches with override dropdowns */}
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle className="text-base">
@@ -167,33 +194,70 @@ export function CsvPreflightStep({
                 {result.categoryMatches.length === 0 ? (
                   <p className="text-sm text-muted-foreground">No categorised transactions in range.</p>
                 ) : (
-                  <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                    {result.categoryMatches.map((m) => (
-                      <div key={m.sourceCategoryId} className="flex items-center gap-2 text-sm">
-                        {m.destinationCategoryId ? (
-                          <CheckCircle2 className="h-4 w-4 text-green-600 shrink-0" />
-                        ) : (
-                          <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
-                        )}
-                        <span className="text-muted-foreground text-xs shrink-0">
-                          {m.sourceGroupName} /
-                        </span>
-                        <span className="truncate font-medium">{m.sourceCategoryName}</span>
-                        <span className="text-muted-foreground">→</span>
-                        <span className="truncate text-muted-foreground">
-                          {m.destinationCategoryName ?? (
-                            <em className="text-amber-600">No match — will skip</em>
+                  <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+                    {result.categoryMatches.map((m) => {
+                      const categoryKey = `${m.sourceGroupName.trim().toLowerCase()}/${m.sourceCategoryName.trim().toLowerCase()}`
+                      const isOverridden = !!overrides[categoryKey]
+                      const isMatched = !!m.destinationCategoryId || isOverridden
+
+                      return (
+                        <div key={m.sourceCategoryId} className="py-1.5 border-b last:border-0 border-slate-100">
+                          <div className="flex items-center gap-2 text-sm">
+                            {isMatched ? (
+                              <CheckCircle2 className="h-4 w-4 text-green-600 shrink-0" />
+                            ) : (
+                              <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
+                            )}
+                            <span className="text-muted-foreground text-xs shrink-0">
+                              {m.sourceGroupName} /
+                            </span>
+                            <span className="truncate font-medium">{m.sourceCategoryName}</span>
+                            <span className="text-muted-foreground shrink-0">→</span>
+                            <span className="truncate text-muted-foreground">
+                              {m.destinationCategoryName ?? (isOverridden
+                                ? <em className="text-green-600">Overridden</em>
+                                : null
+                              )}
+                            </span>
+                          </div>
+                          {/* Override dropdown — only show for unmatched categories */}
+                          {!m.destinationCategoryId && (
+                            <div className="mt-1.5 pl-6">
+                              <div className="relative">
+                                <select
+                                  value={overrides[categoryKey] ?? ''}
+                                  onChange={(e) => handleOverrideChange(categoryKey, e.target.value)}
+                                  className="w-full appearance-none pl-3 pr-8 py-1.5 text-xs rounded-lg border border-slate-200 bg-white text-slate-700 cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                >
+                                  <option value="">— Skip this category —</option>
+                                  {groupDestCategories(result.destinationCategories).map(([group, cats]) => (
+                                    <optgroup key={group} label={group}>
+                                      {cats.map(cat => (
+                                        <option key={cat.id} value={cat.id}>{cat.name}</option>
+                                      ))}
+                                    </optgroup>
+                                  ))}
+                                </select>
+                                <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 h-3 w-3 text-slate-400" />
+                              </div>
+                            </div>
                           )}
-                        </span>
-                      </div>
-                    ))}
+                        </div>
+                      )
+                    })}
                   </div>
                 )}
               </CardContent>
             </Card>
 
             {/* Skip summary */}
-            {result.skippedTransactionSummary.length > 0 && (
+            {result.skippedTransactionSummary.filter(s => {
+              if (s.reason !== 'no_category_match') return true
+              const m = result.categoryMatches.find(m => m.sourceCategoryName === s.categoryName)
+              if (!m) return true
+              const key = `${m.sourceGroupName.trim().toLowerCase()}/${m.sourceCategoryName.trim().toLowerCase()}`
+              return !overrides[key]
+            }).length > 0 && (
               <Card className="border-amber-200 bg-amber-50">
                 <CardHeader className="pb-3">
                   <CardTitle className="text-base text-amber-800">
@@ -202,18 +266,26 @@ export function CsvPreflightStep({
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-1">
-                    {result.skippedTransactionSummary.map((s, i) => (
-                      <div key={i} className="flex justify-between text-sm text-amber-900">
-                        <span>
-                          {s.reason === 'no_account_match'
-                            ? `No account match: "${s.accountName}"`
-                            : s.reason === 'date_out_of_range'
-                            ? 'Date out of range (CSV filter)'
-                            : `No category match: "${s.categoryName}" (${s.accountName})`}
-                        </span>
-                        <span className="font-medium">{s.count}</span>
-                      </div>
-                    ))}
+                    {result.skippedTransactionSummary
+                      .filter(s => {
+                        if (s.reason !== 'no_category_match') return true
+                        const m = result.categoryMatches.find(m => m.sourceCategoryName === s.categoryName)
+                        if (!m) return true
+                        const key = `${m.sourceGroupName.trim().toLowerCase()}/${m.sourceCategoryName.trim().toLowerCase()}`
+                        return !overrides[key]
+                      })
+                      .map((s, i) => (
+                        <div key={i} className="flex justify-between text-sm text-amber-900">
+                          <span>
+                            {s.reason === 'no_account_match'
+                              ? `No account match: "${s.accountName}"`
+                              : s.reason === 'date_out_of_range'
+                              ? 'Date out of range (CSV filter)'
+                              : `No category match: "${s.categoryName}" (${s.accountName})`}
+                          </span>
+                          <span className="font-medium">{s.count}</span>
+                        </div>
+                      ))}
                   </div>
                 </CardContent>
               </Card>
@@ -223,12 +295,12 @@ export function CsvPreflightStep({
 
             <div className="flex justify-between items-center">
               <p className="text-sm text-muted-foreground">
-                {result.willCopyCount.toLocaleString()} transactions will be created in the sandbox budget.
+                {effectiveWillCopy.toLocaleString()} transactions will be created in the sandbox budget.
               </p>
               <Button
                 size="lg"
-                onClick={() => onClone(result)}
-                disabled={result.willCopyCount === 0}
+                onClick={() => onClone(result, overrides)}
+                disabled={effectiveWillCopy === 0}
                 className={dryRun ? 'bg-blue-600 hover:bg-blue-700' : ''}
               >
                 {dryRun ? '🔬 Dry Run Clone' : '🚀 Clone Transactions'}
@@ -262,4 +334,14 @@ function StatCard({
       <div className="text-xs mt-0.5 opacity-80">{label}</div>
     </div>
   )
+}
+
+function groupDestCategories(cats: DestinationCategory[]): [string, DestinationCategory[]][] {
+  const map = new Map<string, DestinationCategory[]>()
+  for (const cat of cats) {
+    const list = map.get(cat.groupName) ?? []
+    list.push(cat)
+    map.set(cat.groupName, list)
+  }
+  return Array.from(map.entries())
 }

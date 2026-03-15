@@ -194,6 +194,16 @@ export async function runPreflight(
   const destAccountMap = buildAccountNameMap(destAccountsResp.data.accounts)
   const destCategoryMap = buildCategoryNameMap(destCatsResp.data.category_groups)
 
+  // Build flat list of destination categories for override dropdowns
+  const destinationCategories: import('./types').DestinationCategory[] = []
+  for (const group of destCatsResp.data.category_groups) {
+    if (group.deleted || group.name === 'Internal Master Category') continue
+    for (const cat of group.categories) {
+      if (cat.deleted) continue
+      destinationCategories.push({ id: cat.id, name: cat.name, groupName: group.name })
+    }
+  }
+
   const globalAccountIdMap = new Map<string, string>()
   for (const src of sourceAccountsResp.data.accounts) {
     if (!src.deleted) {
@@ -414,6 +424,7 @@ export async function runPreflight(
     accountMatches,
     categoryMatches,
     transferPayeeMatches,
+    destinationCategories,
     willCopyCount,
     transferCount,
     willSkipCount,
@@ -444,6 +455,7 @@ export async function cloneTransactions(
   filters: FilterPreferences,
   dryRun: boolean,
   onProgress?: (done: number, total: number) => void,
+  categoryOverrides: import('./types').CategoryOverrides = {},
 ): Promise<CloneResult> {
   const startedAt = new Date().toISOString()
   const client = makeClient(token)
@@ -588,20 +600,26 @@ export async function cloneTransactions(
     if (tx.category_id) {
       const srcCatEntry = sourceCatById.get(tx.category_id)
       if (srcCatEntry) {
-        const destCat = matchCategory(
-          srcCatEntry.group.name,
-          srcCatEntry.cat.name,
-          destCategoryMap,
-        )
-        if (!destCat && tx.subtransactions?.length === 0) {
-          skippedResults.push({
-            sourceTransactionId: tx.id,
-            status: 'skipped',
-            reason: `No destination category match for "${srcCatEntry.cat.name}"`,
-          })
-          continue
+        const overrideKey = `${srcCatEntry.group.name.trim().toLowerCase()}/${srcCatEntry.cat.name.trim().toLowerCase()}`
+        const overrideId = categoryOverrides[overrideKey]
+        if (overrideId) {
+          destCategoryId = overrideId
+        } else {
+          const destCat = matchCategory(
+            srcCatEntry.group.name,
+            srcCatEntry.cat.name,
+            destCategoryMap,
+          )
+          if (!destCat && tx.subtransactions?.length === 0) {
+            skippedResults.push({
+              sourceTransactionId: tx.id,
+              status: 'skipped',
+              reason: `No destination category match for "${srcCatEntry.cat.name}"`,
+            })
+            continue
+          }
+          destCategoryId = destCat?.id ?? null
         }
-        destCategoryId = destCat?.id ?? null
       }
     }
 
@@ -788,6 +806,16 @@ export async function preflightFromCsv(
   const destAccountMap = buildAccountNameMap(destAccountsResp.data.accounts)
   const destCategoryMap = buildCategoryNameMap(destCatsResp.data.category_groups)
 
+  // Build flat list of destination categories for override dropdowns
+  const destinationCategories: import('./types').DestinationCategory[] = []
+  for (const group of destCatsResp.data.category_groups) {
+    if (group.deleted || group.name === 'Internal Master Category') continue
+    for (const cat of group.categories) {
+      if (cat.deleted) continue
+      destinationCategories.push({ id: cat.id, name: cat.name, groupName: group.name })
+    }
+  }
+
   const destTransferPayeeByAccountName = new Map<string, string>()
   for (const p of destPayeesResp.data.payees) {
     if (p.transfer_account_id && !p.deleted) {
@@ -912,6 +940,7 @@ export async function preflightFromCsv(
     accountMatches,
     categoryMatches,
     transferPayeeMatches,
+    destinationCategories,
     willCopyCount,
     transferCount,
     willSkipCount,
@@ -934,6 +963,7 @@ export async function cloneFromCsv(
   filters: CsvFilterPreferences,
   dryRun: boolean,
   onProgress?: (done: number, total: number) => void,
+  categoryOverrides: import('./types').CategoryOverrides = {},
 ): Promise<CloneResult> {
   const startedAt = new Date().toISOString()
   const client = makeClient(token)
@@ -1021,12 +1051,18 @@ export async function cloneFromCsv(
       tx.category.trim().toLowerCase() === 'inflow: ready to assign'
     )
     if (tx.category && tx.categoryGroup && !isSystemCategory) {
-      const dest = matchCategory(tx.categoryGroup, tx.category, destCategoryMap)
-      if (!dest) {
-        skippedResults.push({ sourceTransactionId: sourceId, status: 'skipped', reason: `No destination category match for "${tx.category}"` })
-        continue
+      const overrideKey = `${tx.categoryGroup.trim().toLowerCase()}/${tx.category.trim().toLowerCase()}`
+      const overrideId = categoryOverrides[overrideKey]
+      if (overrideId) {
+        destCategoryId = overrideId
+      } else {
+        const dest = matchCategory(tx.categoryGroup, tx.category, destCategoryMap)
+        if (!dest) {
+          skippedResults.push({ sourceTransactionId: sourceId, status: 'skipped', reason: `No destination category match for "${tx.category}"` })
+          continue
+        }
+        destCategoryId = dest.id
       }
-      destCategoryId = dest.id
     }
 
     const payload: TransactionToPost = {

@@ -48,6 +48,8 @@ export interface PreflightResult {
   accountMatches: AccountMatch[]
   categoryMatches: CategoryMatch[]
   transferPayeeMatches: TransferPayeeMatch[]
+  /** All destination categories available for override dropdowns */
+  destinationCategories: DestinationCategory[]
   /** Total transactions that WILL be posted (accounts + categories all matched). */
   willCopyCount: number
   /** Number of transactions that are native transfers and will be successfully linked natively. */
@@ -56,6 +58,19 @@ export interface PreflightResult {
   willSkipCount: number
   skippedTransactionSummary: SkippedSummary[]
 }
+
+/** Flat list of destination categories for override dropdowns */
+export interface DestinationCategory {
+  id: string
+  name: string
+  groupName: string
+}
+
+/**
+ * Override map: key = "groupName/categoryName" (lowercased), value = destination category ID.
+ * Populated by the user in the preflight step to remap unmatched categories.
+ */
+export type CategoryOverrides = Record<string, string>
 
 export interface SkippedSummary {
   reason: 'no_account_match' | 'no_category_match' | 'date_out_of_range'
