@@ -888,7 +888,13 @@ export async function preflightFromCsv(
     }
 
     // Non-transfer: check category match
-    if (tx.category && tx.categoryGroup) {
+    // Skip matching for "Ready to Assign" — it's YNAB's internal inflow system category,
+    // not a real budget category. These transactions post fine as uncategorized.
+    const isSystemCat = tx.category && (
+      tx.category.trim().toLowerCase() === 'ready to assign' ||
+      tx.category.trim().toLowerCase() === 'inflow: ready to assign'
+    )
+    if (tx.category && tx.categoryGroup && !isSystemCat) {
       const key = `${tx.categoryGroup.trim().toLowerCase()}/${tx.category.trim().toLowerCase()}`
       if (!matchedCatKeys.has(key)) {
         willSkipCount++
@@ -1008,8 +1014,13 @@ export async function cloneFromCsv(
     }
 
     // Resolve category
+    // "Ready to Assign" is YNAB's internal system category for inflows — treat as null
     let destCategoryId: string | null = null
-    if (tx.category && tx.categoryGroup) {
+    const isSystemCategory = tx.category && (
+      tx.category.trim().toLowerCase() === 'ready to assign' ||
+      tx.category.trim().toLowerCase() === 'inflow: ready to assign'
+    )
+    if (tx.category && tx.categoryGroup && !isSystemCategory) {
       const dest = matchCategory(tx.categoryGroup, tx.category, destCategoryMap)
       if (!dest) {
         skippedResults.push({ sourceTransactionId: sourceId, status: 'skipped', reason: `No destination category match for "${tx.category}"` })
