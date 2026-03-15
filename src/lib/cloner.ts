@@ -303,6 +303,13 @@ export async function runPreflight(
     categoryMatches.filter((m) => m.destinationCategoryId !== null).map((m) => m.sourceCategoryId),
   )
 
+  // ── YNAB date-range limit ────────────────────────────────────────────────────
+  const _now2 = new Date()
+  const _minD = new Date(_now2)
+  _minD.setFullYear(_now2.getFullYear() - 5)
+  const PREFLIGHT_MIN_DATE = _minD.toISOString().slice(0, 10)
+  const PREFLIGHT_MAX_DATE = _now2.toISOString().slice(0, 10)
+
   // Count will-copy vs will-skip
   let willCopyCount = 0
   let willSkipCount = 0
@@ -310,6 +317,18 @@ export async function runPreflight(
   const skipMap = new Map<string, SkippedSummary>()
 
   for (const tx of filtered) {
+    // Guard: skip transactions outside YNAB's accepted date range
+    if (tx.date < PREFLIGHT_MIN_DATE || tx.date > PREFLIGHT_MAX_DATE) {
+      willSkipCount++
+      const existing = skipMap.get('date_out_of_range')
+      if (existing) {
+        existing.count++
+      } else {
+        skipMap.set('date_out_of_range', { reason: 'date_out_of_range', accountName: '', categoryName: '', count: 1 })
+      }
+      continue
+    }
+
     const accountMatched = matchedAccountIds.has(tx.account_id)
 
     if (!accountMatched) {
@@ -524,6 +543,14 @@ export async function cloneTransactions(
   // the sister transactions to prevent duplicating transfers in the sandbox.
   const handledTransfers = new Set<string>()
 
+  // ── YNAB date-range limit ──────────────────────────────────────────────────
+  // YNAB API rejects dates older than 5 years or in the future.
+  const _now = new Date()
+  const _minDate = new Date(_now)
+  _minDate.setFullYear(_now.getFullYear() - 5)
+  const MIN_DATE = _minDate.toISOString().slice(0, 10) // YYYY-MM-DD
+  const MAX_DATE = _now.toISOString().slice(0, 10)     // YYYY-MM-DD
+
   for (const tx of eligible) {
     if (handledTransfers.has(tx.id)) {
       // The sister transaction was already processed and natively linked by YNAB
@@ -531,6 +558,16 @@ export async function cloneTransactions(
       results.push({
         sourceTransactionId: tx.id,
         status: 'copied',
+      })
+      continue
+    }
+
+    // Guard: skip transactions outside YNAB's accepted date range
+    if (tx.date < MIN_DATE || tx.date > MAX_DATE) {
+      skippedResults.push({
+        sourceTransactionId: tx.id,
+        status: 'skipped',
+        reason: `Date ${tx.date} is outside YNAB's accepted range (${MIN_DATE} to ${MAX_DATE})`,
       })
       continue
     }

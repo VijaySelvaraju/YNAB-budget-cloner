@@ -46,7 +46,7 @@ export interface PreflightResult {
 }
 
 export interface SkippedSummary {
-  reason: 'no_account_match' | 'no_category_match'
+  reason: 'no_account_match' | 'no_category_match' | 'date_out_of_range'
   accountName: string
   categoryName: string
   count: number
