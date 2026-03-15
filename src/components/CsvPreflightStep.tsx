@@ -99,10 +99,11 @@ export function CsvPreflightStep({
             </svg>
           </div>
           <div>
-            <p className="text-sm font-semibold text-violet-800">Source: CSV export — full history, no date restrictions</p>
+            <p className="text-sm font-semibold text-violet-800">Source: CSV export — full history available</p>
             <p className="text-xs text-violet-600">
               {csvTransactions.length.toLocaleString()} total transactions · Range:{' '}
               <strong>{filters.startDate}</strong> → <strong>{filters.endDate}</strong>
+              {' '}· Transactions older than 5 years will be skipped (YNAB API limit)
             </p>
           </div>
         </div>
