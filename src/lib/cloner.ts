@@ -857,6 +857,12 @@ export async function preflightFromCsv(
   for (const tx of filtered) {
     if (!tx.category || !tx.categoryGroup) continue
     if (tx.isTransfer) continue
+    // Skip YNAB system categories — they are treated as uncategorized at clone
+    // time and must never appear as override candidates in the UI.
+    const isSystemCat =
+      tx.category.trim().toLowerCase() === 'ready to assign' ||
+      tx.category.trim().toLowerCase() === 'inflow: ready to assign'
+    if (isSystemCat) continue
     const key = `${tx.categoryGroup.trim().toLowerCase()}/${tx.category.trim().toLowerCase()}`
     if (catKeySet.has(key)) continue
     catKeySet.add(key)
@@ -996,6 +1002,17 @@ export async function cloneFromCsv(
     return true
   })
 
+  // ── YNAB date-range limit ──────────────────────────────────────────────────
+  // The YNAB API enforces a 5-year window on the destination budget regardless
+  // of how the source data was obtained.  Skip out-of-range transactions
+  // gracefully here so they appear in the skip log rather than causing batch
+  // API errors that would take down surrounding valid transactions.
+  const _now = new Date()
+  const _minDate = new Date(_now)
+  _minDate.setFullYear(_now.getFullYear() - 5)
+  const CSV_MIN_DATE = _minDate.toISOString().slice(0, 10) // YYYY-MM-DD
+  const CSV_MAX_DATE = _now.toISOString().slice(0, 10)     // YYYY-MM-DD
+
   const results: TransactionResult[] = []
   const skippedResults: TransactionResult[] = []
   const toPost: Array<{ payload: TransactionToPost; sourceId: string }> = []
@@ -1007,6 +1024,16 @@ export async function cloneFromCsv(
   for (let i = 0; i < eligible.length; i++) {
     const tx = eligible[i]
     const sourceId = `csv-${i}`
+
+    // Guard: skip transactions outside YNAB's accepted date range
+    if (tx.date < CSV_MIN_DATE || tx.date > CSV_MAX_DATE) {
+      skippedResults.push({
+        sourceTransactionId: sourceId,
+        status: 'skipped',
+        reason: `Date ${tx.date} is outside YNAB's accepted range (${CSV_MIN_DATE} to ${CSV_MAX_DATE})`,
+      })
+      continue
+    }
 
     // Resolve destination account
     const destAcct = destAccountMap.get(tx.account.trim().toLowerCase())
