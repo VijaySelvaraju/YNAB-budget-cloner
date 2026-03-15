@@ -106,6 +106,7 @@ Click the button at the top of this page — Netlify will fork the repo and depl
 - **Date range filter** — manual From/To date pickers plus quick-select presets. The start date is sent as `since_date` on the YNAB API request (server-side filtering, not fetching everything and slicing in memory).
 - **Account filter** — multi-select checklist with a select-all toggle. Only transactions for selected accounts are fetched.
 - **Name-based matching** — accounts and categories are matched by name between source and destination. Category matching tries `Group / Category` first, then falls back to plain category name.
+- **Native Account Transfers** — automatically detects and natively links transfers between your cloned accounts in the sandbox, so you don't have to manually re-link them.
 - **Split transaction support** — subtransactions are mapped individually. A parent with at least one mappable sub is copied; a parent with zero mappable subs is skipped.
 - **Pre-flight diff** — review every account and category match (or mismatch) and see exactly how many transactions will be copied vs skipped before committing.
 - **Download log** — the full result (every transaction's status, reason for skipping, destination ID if created) is exportable as a timestamped JSON file.

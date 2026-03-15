@@ -8,25 +8,32 @@ import type { Budget } from '@/lib/ynabApi'
 
 interface Props {
   budgets: Budget[]
+  primaryBudgetId: string | null
   sourceBudgetId: string
   destBudgetId: string
   onSourceChange: (id: string) => void
   onDestChange: (id: string) => void
   onContinue: () => void
   onDisconnect: () => void
+  onChangePrimary?: () => void
 }
 
 export function BudgetStep({
   budgets,
+  primaryBudgetId,
   sourceBudgetId,
   destBudgetId,
   onSourceChange,
   onDestChange,
   onContinue,
   onDisconnect,
+  onChangePrimary,
 }: Props) {
   const sameBudget = sourceBudgetId && destBudgetId && sourceBudgetId === destBudgetId
   const canContinue = sourceBudgetId && destBudgetId && !sameBudget
+  
+  const destBudgets = budgets.filter((b) => b.id !== primaryBudgetId)
+  const primaryBudgetName = budgets.find((b) => b.id === primaryBudgetId)?.name
 
   return (
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
@@ -84,7 +91,7 @@ export function BudgetStep({
                   <SelectValue placeholder="Select destination budget…" />
                 </SelectTrigger>
                 <SelectContent>
-                  {budgets.map((b) => (
+                  {destBudgets.map((b) => (
                     <SelectItem key={b.id} value={b.id}>
                       {b.name}
                     </SelectItem>
@@ -94,6 +101,17 @@ export function BudgetStep({
             </CardContent>
           </Card>
         </div>
+
+        {primaryBudgetName && (
+          <div className="text-center text-amber-700 text-sm bg-amber-50 py-2 rounded-md font-medium border border-amber-200 flex flex-col items-center justify-center gap-1">
+            <p>Your real budget <strong>{primaryBudgetName}</strong> is protected and will never appear as a destination.</p>
+            {onChangePrimary && (
+              <Button variant="ghost" className="h-auto p-0 text-amber-800 hover:text-amber-900 hover:bg-transparent underline font-semibold" onClick={onChangePrimary}>
+                Click here to change it
+              </Button>
+            )}
+          </div>
+        )}
 
         {/* Same-budget error */}
         {sameBudget && (

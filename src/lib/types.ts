@@ -26,11 +26,20 @@ export interface CategoryMatch {
   destinationCategoryName: string | null
 }
 
+export interface TransferPayeeMatch {
+  sourceAccountId: string
+  sourceAccountName: string
+  destinationTransferPayeeId: string | null
+}
+
 export interface PreflightResult {
   accountMatches: AccountMatch[]
   categoryMatches: CategoryMatch[]
+  transferPayeeMatches: TransferPayeeMatch[]
   /** Total transactions that WILL be posted (accounts + categories all matched). */
   willCopyCount: number
+  /** Number of transactions that are native transfers and will be successfully linked natively. */
+  transferCount: number
   /** Transactions skipped because account or category has no match. */
   willSkipCount: number
   skippedTransactionSummary: SkippedSummary[]
@@ -70,6 +79,7 @@ export interface TransactionToPost {
   date: string
   amount: number
   payee_name: string | null
+  payee_id?: string | null
   category_id: string | null
   memo: string | null
   cleared: string

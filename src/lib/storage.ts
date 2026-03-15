@@ -4,6 +4,7 @@ import type { FilterPreferences } from './types'
 const KEYS = {
   TOKEN: 'ynab_token',
   FILTERS: 'ynab_cloner_filters',
+  PRIMARY_BUDGET: 'ynab_primary_budget_id',
 } as const
 
 // ─── Token ────────────────────────────────────────────────────────────────────
@@ -18,6 +19,20 @@ export function setToken(token: string): void {
 
 export function clearToken(): void {
   localStorage.removeItem(KEYS.TOKEN)
+}
+
+// ─── Primary Budget ───────────────────────────────────────────────────────────
+
+export function getPrimaryBudgetId(): string | null {
+  return localStorage.getItem(KEYS.PRIMARY_BUDGET)
+}
+
+export function setPrimaryBudgetId(id: string): void {
+  localStorage.setItem(KEYS.PRIMARY_BUDGET, id)
+}
+
+export function clearPrimaryBudgetId(): void {
+  localStorage.removeItem(KEYS.PRIMARY_BUDGET)
 }
 
 // ─── Filter preferences ───────────────────────────────────────────────────────

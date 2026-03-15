@@ -5,20 +5,25 @@ import { FiltersStep } from '@/components/FiltersStep'
 import { PreflightStep } from '@/components/PreflightStep'
 import { CloningStep } from '@/components/CloningStep'
 import { ResultStep } from '@/components/ResultStep'
-import { getToken, clearToken, getFilters } from '@/lib/storage'
+import { HowItWorksModal } from '@/components/HowItWorksModal'
+import { FreshStartConfirmStep } from '@/components/FreshStartConfirmStep'
+import { PrimaryBudgetStep } from '@/components/PrimaryBudgetStep'
+import { getToken, clearToken, getFilters, getPrimaryBudgetId, setPrimaryBudgetId as savePrimaryBudgetId, clearPrimaryBudgetId } from '@/lib/storage'
 import { cloneTransactions } from '@/lib/cloner'
 import type { Budget } from '@/lib/ynabApi'
 import type { CloneResult, FilterPreferences, PreflightResult } from '@/lib/types'
 
-type Step = 'token' | 'budgets' | 'filters' | 'preflight' | 'cloning' | 'result'
+type Step = 'token' | 'primary_budget' | 'fresh_start_confirm' | 'budgets' | 'filters' | 'preflight' | 'cloning' | 'result'
 
 export default function App() {
   const savedToken = getToken() ?? ''
+  const savedPrimary = getPrimaryBudgetId()
 
   const [step, setStep] = useState<Step>(savedToken ? 'budgets' : 'token')
   const [token, setTokenState] = useState(savedToken)
+  const [primaryBudgetId, setPrimaryBudgetIdState] = useState<string | null>(savedPrimary)
   const [budgets, setBudgets] = useState<Budget[]>([])
-  const [sourceBudgetId, setSourceBudgetId] = useState('')
+  const [sourceBudgetId, setSourceBudgetId] = useState(savedPrimary ?? '')
   const [destBudgetId, setDestBudgetId] = useState('')
   const [filters, setFiltersState] = useState<FilterPreferences>(getFilters)
   const [dryRun, setDryRun] = useState(false)
@@ -29,13 +34,27 @@ export default function App() {
   function handleTokenSuccess(t: string, b: Budget[]) {
     setTokenState(t)
     setBudgets(b)
-    setStep('budgets')
+    if (!primaryBudgetId) {
+      setStep('primary_budget')
+    } else {
+      setStep('fresh_start_confirm')
+    }
+  }
+
+  // ── Primary Budget step ─────────────────────────────────────────────────────
+  function handlePrimaryBudgetComplete(id: string) {
+    savePrimaryBudgetId(id)
+    setPrimaryBudgetIdState(id)
+    setSourceBudgetId(id) // Pre-select for the source picker
+    setStep('fresh_start_confirm')
   }
 
   // ── Budget step ─────────────────────────────────────────────────────────────
   function handleDisconnect() {
     clearToken()
+    clearPrimaryBudgetId()
     setTokenState('')
+    setPrimaryBudgetIdState(null)
     setBudgets([])
     setSourceBudgetId('')
     setDestBudgetId('')
@@ -98,79 +117,85 @@ export default function App() {
   // ── Render ───────────────────────────────────────────────────────────────────
   const sourceBudgetName = budgets.find((b) => b.id === sourceBudgetId)?.name ?? sourceBudgetId
   const destBudgetName = budgets.find((b) => b.id === destBudgetId)?.name ?? destBudgetId
-
+  
   // If we have a saved token but budgets haven't been loaded yet (e.g. page refresh),
   // show the token step to re-authenticate instead of crashing.
+  let content = null
   if (step === 'budgets' && budgets.length === 0) {
-    return (
-      <TokenStep
-        initialToken={token}
-        onSuccess={handleTokenSuccess}
-      />
-    )
+    content = <TokenStep initialToken={token} onSuccess={handleTokenSuccess} />
+  } else {
+    switch (step) {
+      case 'token':
+        content = <TokenStep initialToken={token} onSuccess={handleTokenSuccess} />
+        break
+      case 'primary_budget':
+        content = <PrimaryBudgetStep budgets={budgets} onComplete={handlePrimaryBudgetComplete} />
+        break
+      case 'fresh_start_confirm':
+        content = <FreshStartConfirmStep onConfirm={() => setStep('budgets')} />
+        break
+      case 'budgets':
+        content = (
+          <BudgetStep
+            budgets={budgets}
+            primaryBudgetId={primaryBudgetId}
+            sourceBudgetId={sourceBudgetId}
+            destBudgetId={destBudgetId}
+            onSourceChange={setSourceBudgetId}
+            onDestChange={setDestBudgetId}
+            onContinue={handleContinueToFilters}
+            onDisconnect={handleDisconnect}
+            onChangePrimary={() => setStep('primary_budget')}
+          />
+        )
+        break
+      case 'filters':
+        content = (
+          <FiltersStep
+            token={token}
+            sourceBudgetId={sourceBudgetId}
+            filters={filters}
+            dryRun={dryRun}
+            onFiltersChange={setFiltersState}
+            onDryRunChange={setDryRun}
+            onRunPreflight={handleRunPreflight}
+            onBack={() => setStep('budgets')}
+          />
+        )
+        break
+      case 'preflight':
+        content = (
+          <PreflightStep
+            token={token}
+            sourceBudgetId={sourceBudgetId}
+            destBudgetId={destBudgetId}
+            filters={filters}
+            dryRun={dryRun}
+            onClone={handleClone}
+            onBack={() => setStep('filters')}
+          />
+        )
+        break
+      case 'cloning':
+        content = <CloningStep done={cloneProgress.done} total={cloneProgress.total} dryRun={dryRun} />
+        break
+      case 'result':
+        content = (
+          <ResultStep
+            result={cloneResult!}
+            sourceBudgetName={sourceBudgetName}
+            destBudgetName={destBudgetName}
+            onStartOver={handleStartOver}
+          />
+        )
+        break
+    }
   }
 
-  switch (step) {
-    case 'token':
-      return <TokenStep initialToken={token} onSuccess={handleTokenSuccess} />
-
-    case 'budgets':
-      return (
-        <BudgetStep
-          budgets={budgets}
-          sourceBudgetId={sourceBudgetId}
-          destBudgetId={destBudgetId}
-          onSourceChange={setSourceBudgetId}
-          onDestChange={setDestBudgetId}
-          onContinue={handleContinueToFilters}
-          onDisconnect={handleDisconnect}
-        />
-      )
-
-    case 'filters':
-      return (
-        <FiltersStep
-          token={token}
-          sourceBudgetId={sourceBudgetId}
-          filters={filters}
-          dryRun={dryRun}
-          onFiltersChange={setFiltersState}
-          onDryRunChange={setDryRun}
-          onRunPreflight={handleRunPreflight}
-          onBack={() => setStep('budgets')}
-        />
-      )
-
-    case 'preflight':
-      return (
-        <PreflightStep
-          token={token}
-          sourceBudgetId={sourceBudgetId}
-          destBudgetId={destBudgetId}
-          filters={filters}
-          dryRun={dryRun}
-          onClone={handleClone}
-          onBack={() => setStep('filters')}
-        />
-      )
-
-    case 'cloning':
-      return (
-        <CloningStep
-          done={cloneProgress.done}
-          total={cloneProgress.total}
-          dryRun={dryRun}
-        />
-      )
-
-    case 'result':
-      return (
-        <ResultStep
-          result={cloneResult!}
-          sourceBudgetName={sourceBudgetName}
-          destBudgetName={destBudgetName}
-          onStartOver={handleStartOver}
-        />
-      )
-  }
+  return (
+    <>
+      <HowItWorksModal onChangePrimaryBudget={() => setStep('primary_budget')} />
+      {content}
+    </>
+  )
 }

@@ -80,8 +80,9 @@ export function PreflightStep({
         {result && (
           <>
             {/* Summary */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
               <StatCard label="Will copy" value={result.willCopyCount} color="green" />
+              <StatCard label="Native Transfers" value={result.transferCount} color="blue" />
               <StatCard label="Will skip" value={result.willSkipCount} color="amber" />
               <StatCard label="Accounts unmatched" value={unmatchedAccounts.length} color={unmatchedAccounts.length > 0 ? 'red' : 'green'} />
               <StatCard label="Categories unmatched" value={unmatchedCategories.length} color={unmatchedCategories.length > 0 ? 'amber' : 'green'} />
@@ -99,25 +100,45 @@ export function PreflightStep({
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  {result.accountMatches.map((m) => (
-                    <div key={m.sourceAccountId} className="flex items-center justify-between gap-2 text-sm">
-                      <div className="flex items-center gap-2 min-w-0">
-                        {m.destinationAccountId ? (
-                          <CheckCircle2 className="h-4 w-4 text-green-600 shrink-0" />
-                        ) : (
-                          <XCircle className="h-4 w-4 text-red-500 shrink-0" />
+                  {result.accountMatches.map((m) => {
+                    const transferMatch = result.transferPayeeMatches.find(t => t.sourceAccountId === m.sourceAccountId)
+                    
+                    return (
+                      <div key={m.sourceAccountId} className="flex flex-col gap-1 py-1 border-b last:border-0 border-slate-100">
+                        <div className="flex items-center justify-between gap-2 text-sm">
+                          <div className="flex items-center gap-2 min-w-0">
+                            {m.destinationAccountId ? (
+                              <CheckCircle2 className="h-4 w-4 text-green-600 shrink-0" />
+                            ) : (
+                              <XCircle className="h-4 w-4 text-red-500 shrink-0" />
+                            )}
+                            <span className="truncate font-medium">{m.sourceAccountName}</span>
+                            <span className="text-muted-foreground">→</span>
+                            <span className="truncate text-muted-foreground">
+                              {m.destinationAccountName ?? <em className="text-red-500">No match</em>}
+                            </span>
+                          </div>
+                          <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0">
+                            {m.transactionCount} tx
+                          </span>
+                        </div>
+                        {/* Transfer Support Indicator */}
+                        {m.destinationAccountId && (
+                          <div className="pl-6 flex items-center gap-1.5 text-xs">
+                            {transferMatch?.destinationTransferPayeeId ? (
+                              <span className="text-blue-600 flex items-center gap-1">
+                                <CheckCircle2 className="h-3 w-3" /> Native transfers supported
+                              </span>
+                            ) : (
+                              <span className="text-amber-600 flex items-center gap-1">
+                                <AlertTriangle className="h-3 w-3" /> Transfers will fallback to plain text
+                              </span>
+                            )}
+                          </div>
                         )}
-                        <span className="truncate font-medium">{m.sourceAccountName}</span>
-                        <span className="text-muted-foreground">→</span>
-                        <span className="truncate text-muted-foreground">
-                          {m.destinationAccountName ?? <em className="text-red-500">No match</em>}
-                        </span>
                       </div>
-                      <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0">
-                        {m.transactionCount} tx
-                      </span>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </CardContent>
             </Card>
@@ -215,10 +236,11 @@ function StatCard({
 }: {
   label: string
   value: number
-  color: 'green' | 'amber' | 'red'
+  color: 'green' | 'blue' | 'amber' | 'red'
 }) {
   const colors = {
     green: 'bg-green-50 border-green-200 text-green-800',
+    blue: 'bg-blue-50 border-blue-200 text-blue-800',
     amber: 'bg-amber-50 border-amber-200 text-amber-800',
     red: 'bg-red-50 border-red-200 text-red-800',
   }

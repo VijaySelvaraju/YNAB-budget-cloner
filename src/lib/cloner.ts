@@ -61,6 +61,27 @@ function buildAccountNameMap(
 }
 
 /**
+ * Sanitize payee names to prevent YNAB API from rejecting transactions that start
+ * with internal payee names.
+ */
+function sanitizePayeeName(name: string | null | undefined): string | null {
+  if (!name) return null
+  
+  // YNAB API strictly rejects any payee name that contains these reserved internal
+  // substrings, regardless of where they appear in the string. We cannot just
+  // prefix them; we must remove or alter the restricted substrings themselves.
+  let sanitized = name
+  
+  // Use case-insensitive regex replacements to neuter the internal names
+  sanitized = sanitized.replace(/Transfer : /gi, 'Transfer (Cloned) ')
+  sanitized = sanitized.replace(/Starting Balance/gi, 'Starting Balance (Cloned)')
+  sanitized = sanitized.replace(/Manual Balance Adjustment/gi, 'Manual Balance Adjustment (Cloned)')
+  sanitized = sanitized.replace(/Reconciliation Balance Adjustment/gi, 'Reconciliation Balance Adjustment (Cloned)')
+  
+  return sanitized
+}
+
+/**
  * Build a name→id map from all categories across all groups.
  * Key is "<group name>/<category name>" (case-insensitive) to handle
  * same-named categories in different groups.  Falls back to plain
@@ -158,11 +179,13 @@ export async function runPreflight(
     destAccountsResp,
     sourceCatsResp,
     destCatsResp,
+    destPayeesResp,
   ] = await Promise.all([
     client.accounts.getAccounts(sourceBudgetId),
     client.accounts.getAccounts(destBudgetId),
     client.categories.getCategories(sourceBudgetId),
     client.categories.getCategories(destBudgetId),
+    client.payees.getPayees(destBudgetId),
   ])
 
   const sourceAccounts = sourceAccountsResp.data.accounts.filter(
@@ -170,6 +193,21 @@ export async function runPreflight(
   )
   const destAccountMap = buildAccountNameMap(destAccountsResp.data.accounts)
   const destCategoryMap = buildCategoryNameMap(destCatsResp.data.category_groups)
+
+  const globalAccountIdMap = new Map<string, string>()
+  for (const src of sourceAccountsResp.data.accounts) {
+    if (!src.deleted) {
+      const dest = destAccountMap.get(src.name.trim().toLowerCase())
+      if (dest) globalAccountIdMap.set(src.id, dest.id)
+    }
+  }
+
+  const destTransferPayeeByAccountId = new Map<string, string>()
+  for (const p of destPayeesResp.data.payees) {
+    if (p.transfer_account_id && !p.deleted) {
+      destTransferPayeeByAccountId.set(p.transfer_account_id, p.id)
+    }
+  }
 
   // Determine which source accounts are selected
   const selectedIds =
@@ -197,17 +235,32 @@ export async function runPreflight(
     txCountByAccount.set(tx.account_id, (txCountByAccount.get(tx.account_id) ?? 0) + 1)
   }
 
-  // Build account match table
-  const accountMatches: AccountMatch[] = includedSourceAccounts.map((a) => {
+  // Build account match table and transfer payee mapping
+  const accountMatches: AccountMatch[] = []
+  const transferPayeeMatches: import('./types').TransferPayeeMatch[] = []
+
+  for (const a of includedSourceAccounts) {
     const destAccount = destAccountMap.get(a.name.trim().toLowerCase()) ?? null
-    return {
+    
+    // Find the YNAB auto-generated Transfer Payee for this destination account
+    const destTransferPayee = destAccount 
+      ? destPayeesResp.data.payees.find(p => p.transfer_account_id === destAccount.id && !p.deleted) ?? null
+      : null
+
+    accountMatches.push({
       sourceAccountId: a.id,
       sourceAccountName: a.name,
       destinationAccountId: destAccount?.id ?? null,
       destinationAccountName: destAccount?.name ?? null,
       transactionCount: txCountByAccount.get(a.id) ?? 0,
-    }
-  })
+    })
+
+    transferPayeeMatches.push({
+      sourceAccountId: a.id,
+      sourceAccountName: a.name,
+      destinationTransferPayeeId: destTransferPayee?.id ?? null,
+    })
+  }
 
   // Collect all unique source categories referenced in filtered transactions
   const sourceCatGroups = sourceCatsResp.data.category_groups
@@ -253,6 +306,7 @@ export async function runPreflight(
   // Count will-copy vs will-skip
   let willCopyCount = 0
   let willSkipCount = 0
+  let transferCount = 0
   const skipMap = new Map<string, SkippedSummary>()
 
   for (const tx of filtered) {
@@ -326,12 +380,23 @@ export async function runPreflight(
     }
 
     willCopyCount++
+    if (tx.transfer_account_id) {
+      const mappedTransferDestAcctId = globalAccountIdMap.get(tx.transfer_account_id)
+      if (mappedTransferDestAcctId) {
+        const pId = destTransferPayeeByAccountId.get(mappedTransferDestAcctId)
+        if (pId) {
+          transferCount++
+        }
+      }
+    }
   }
 
   return {
     accountMatches,
     categoryMatches,
+    transferPayeeMatches,
     willCopyCount,
+    transferCount,
     willSkipCount,
     skippedTransactionSummary: Array.from(skipMap.values()),
   }
@@ -364,17 +429,26 @@ export async function cloneTransactions(
   const startedAt = new Date().toISOString()
   const client = makeClient(token)
 
-  // ── 1. Load destination accounts & categories ──────────────────────────────
-  const [destAccountsResp, destCatsResp, sourceAccountsResp, sourceCatsResp] =
+  // ── 1. Load destination accounts & categories & payees ──────────────────────────────
+  const [destAccountsResp, destCatsResp, destPayeesResp, sourceAccountsResp, sourceCatsResp] =
     await Promise.all([
       client.accounts.getAccounts(destBudgetId),
       client.categories.getCategories(destBudgetId),
+      client.payees.getPayees(destBudgetId),
       client.accounts.getAccounts(sourceBudgetId),
       client.categories.getCategories(sourceBudgetId),
     ])
 
   const destAccountMap = buildAccountNameMap(destAccountsResp.data.accounts)
   const destCategoryMap = buildCategoryNameMap(destCatsResp.data.category_groups)
+  
+  // Destination transfer payees lookup (account_id → payee_id)
+  const destTransferPayeeByAccountId = new Map<string, string>()
+  for (const p of destPayeesResp.data.payees) {
+    if (p.transfer_account_id && !p.deleted) {
+      destTransferPayeeByAccountId.set(p.transfer_account_id, p.id)
+    }
+  }
 
   // Source category lookup (id → {cat, group})
   const sourceCatById = new Map<string, { cat: ynab.Category; group: ynab.CategoryGroupWithCategories }>()
@@ -390,7 +464,20 @@ export async function cloneTransactions(
     sourceAccountById.set(a.id, a)
   }
 
-  // ── 2. Build account ID translation map (source → destination) ─────────────
+  // ── 2a. Build global account ID translation map (source → destination) ──────
+  // Used to map transfer endpoints, even if the destination account wasn't
+  // selected for cloning.
+  const globalAccountIdMap = new Map<string, string>()
+  for (const src of sourceAccountsResp.data.accounts) {
+    if (!src.deleted) {
+      const dest = destAccountMap.get(src.name.trim().toLowerCase())
+      if (dest) {
+        globalAccountIdMap.set(src.id, dest.id)
+      }
+    }
+  }
+
+  // ── 2b. Build scoped account ID translation map (source → destination) ──────
   // This is done BEFORE fetching transactions so we know exactly which
   // source account IDs to request.
   const selectedIds =
@@ -432,8 +519,22 @@ export async function cloneTransactions(
   // All account/category resolution happens here, before any POST calls.
   const toPost: Array<{ payload: TransactionToPost; sourceId: string }> = []
   const skippedResults: TransactionResult[] = []
+  
+  // YNAB auto-generates the other half of a native transfer. We must track and deduplicate
+  // the sister transactions to prevent duplicating transfers in the sandbox.
+  const handledTransfers = new Set<string>()
 
   for (const tx of eligible) {
+    if (handledTransfers.has(tx.id)) {
+      // The sister transaction was already processed and natively linked by YNAB
+      // We record it as a success immediately without POSTing again.
+      results.push({
+        sourceTransactionId: tx.id,
+        status: 'copied',
+      })
+      continue
+    }
+
     const destAccountId = accountIdMap.get(tx.account_id)
     if (!destAccountId) {
       // Should not happen since we only fetched fetchableAccountIds, but guard anyway
@@ -486,7 +587,7 @@ export async function cloneTransactions(
         }
         resolvedSubs.push({
           amount: sub.amount,
-          payee_name: sub.payee_name ?? null,
+          payee_name: sanitizePayeeName(sub.payee_name),
           category_id: subCategoryId,
           memo: sub.memo ?? null,
         })
@@ -503,11 +604,40 @@ export async function cloneTransactions(
       }
     }
 
+    // YNAB API requires that if subtransactions exist, their amounts MUST sum exactly to the parent's amount.
+    // If we dropped some subtransactions because their categories were missing, the sum will be off,
+    // and the YNAB API will reject the entire parent transaction with a 400 error.
+    // To handle this gracefully without losing the matched subtransactions, we must adjust the parent amount
+    // to match the sum of the surviving subtransactions.
+    let finalAmount = tx.amount
+    if (resolvedSubs) {
+      finalAmount = resolvedSubs.reduce((sum, sub) => sum + sub.amount, 0)
+    }
+    
+    // Resolve transfer payee if applicable
+    let payeeId: string | null = null
+    let finalPayeeName: string | null = sanitizePayeeName(tx.payee_name)
+    
+    if (tx.transfer_account_id) {
+      const mappedTransferDestAcctId = globalAccountIdMap.get(tx.transfer_account_id)
+      if (mappedTransferDestAcctId) {
+        const pId = destTransferPayeeByAccountId.get(mappedTransferDestAcctId)
+        if (pId) {
+          payeeId = pId
+          finalPayeeName = null // when supplying a transfer payee id, payee_name must be null
+          if (tx.transfer_transaction_id) {
+            handledTransfers.add(tx.transfer_transaction_id)
+          }
+        }
+      }
+    }
+
     const payload: TransactionToPost = {
       account_id: destAccountId,
       date: tx.date,
-      amount: tx.amount,
-      payee_name: tx.payee_name ?? null,
+      amount: finalAmount,
+      payee_name: finalPayeeName,
+      ...(payeeId ? { payee_id: payeeId } : {}),
       category_id: resolvedSubs ? null : destCategoryId, // splits use sub-level categories
       memo: tx.memo ?? null,
       cleared: tx.cleared,
@@ -547,8 +677,27 @@ export async function cloneTransactions(
             destinationTransactionId: created[j]?.id,
           })
         }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
+      } catch (err: any) {
+        console.error("YNAB API Error when POSTing batch:");
+        console.error(JSON.stringify(batch.map(b => b.payload), null, 2));
+
+        let message = 'Unknown error'
+        if (err?.error?.detail) {
+          message = err.error.detail
+        } else if (err?.error?.name && err?.error?.description) {
+          message = `${err.error.name}: ${err.error.description}`
+        } else if (err instanceof Error) {
+          message = err.message
+        } else if (typeof err === 'object') {
+          try {
+            message = JSON.stringify(err, Object.getOwnPropertyNames(err))
+          } catch {
+            message = String(err)
+          }
+        } else {
+          message = String(err)
+        }
+        
         for (const item of batch) {
           results.push({
             sourceTransactionId: item.sourceId,
