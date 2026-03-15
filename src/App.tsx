@@ -1,19 +1,45 @@
 import { useState } from 'react'
+import { format } from 'date-fns'
 import { TokenStep } from '@/components/TokenStep'
 import { BudgetStep } from '@/components/BudgetStep'
 import { FiltersStep } from '@/components/FiltersStep'
+import { CsvFiltersStep } from '@/components/CsvFiltersStep'
 import { PreflightStep } from '@/components/PreflightStep'
+import { CsvPreflightStep } from '@/components/CsvPreflightStep'
 import { CloningStep } from '@/components/CloningStep'
 import { ResultStep } from '@/components/ResultStep'
 import { HowItWorksModal } from '@/components/HowItWorksModal'
 import { FreshStartConfirmStep } from '@/components/FreshStartConfirmStep'
 import { PrimaryBudgetStep } from '@/components/PrimaryBudgetStep'
+import { SourceModeStep } from '@/components/SourceModeStep'
+import { CsvUploadStep } from '@/components/CsvUploadStep'
 import { getToken, clearToken, getFilters, getPrimaryBudgetId, setPrimaryBudgetId as savePrimaryBudgetId, clearPrimaryBudgetId } from '@/lib/storage'
-import { cloneTransactions } from '@/lib/cloner'
+import { cloneTransactions, cloneFromCsv } from '@/lib/cloner'
 import type { Budget } from '@/lib/ynabApi'
-import type { CloneResult, FilterPreferences, PreflightResult } from '@/lib/types'
+import type { CloneResult, CsvFilterPreferences, FilterPreferences, PreflightResult, SourceMode } from '@/lib/types'
+import type { CsvTransaction } from '@/lib/csvParser'
 
-type Step = 'token' | 'primary_budget' | 'fresh_start_confirm' | 'budgets' | 'filters' | 'preflight' | 'cloning' | 'result'
+type Step =
+  | 'token'
+  | 'source_mode'
+  | 'primary_budget'
+  | 'fresh_start_confirm'
+  | 'budgets'
+  | 'csv_upload'
+  | 'filters'
+  | 'csv_filters'
+  | 'preflight'
+  | 'csv_preflight'
+  | 'cloning'
+  | 'result'
+
+const today = () => format(new Date(), 'yyyy-MM-dd')
+
+const DEFAULT_CSV_FILTERS: CsvFilterPreferences = {
+  startDate: '2000-01-01',
+  endDate: today(),
+  selectedAccountNames: null,
+}
 
 export default function App() {
   const savedToken = getToken() ?? ''
@@ -30,7 +56,13 @@ export default function App() {
   const [cloneProgress, setCloneProgress] = useState({ done: 0, total: 0 })
   const [cloneResult, setCloneResult] = useState<CloneResult | null>(null)
 
-  // ── Token step ──────────────────────────────────────────────────────────────
+  // ── CSV state ────────────────────────────────────────────────────────────────
+  const [sourceMode, setSourceMode] = useState<SourceMode>('api')
+  const [csvTransactions, setCsvTransactions] = useState<CsvTransaction[]>([])
+  const [csvAccounts, setCsvAccounts] = useState<string[]>([])
+  const [csvFilters, setCsvFiltersState] = useState<CsvFilterPreferences>(DEFAULT_CSV_FILTERS)
+
+  // ── Token step ───────────────────────────────────────────────────────────────
   function handleTokenSuccess(t: string, b: Budget[]) {
     setTokenState(t)
     setBudgets(b)
@@ -41,15 +73,15 @@ export default function App() {
     }
   }
 
-  // ── Primary Budget step ─────────────────────────────────────────────────────
+  // ── Primary Budget step ──────────────────────────────────────────────────────
   function handlePrimaryBudgetComplete(id: string) {
     savePrimaryBudgetId(id)
     setPrimaryBudgetIdState(id)
-    setSourceBudgetId(id) // Pre-select for the source picker
+    setSourceBudgetId(id)
     setStep('fresh_start_confirm')
   }
 
-  // ── Budget step ─────────────────────────────────────────────────────────────
+  // ── Disconnect ───────────────────────────────────────────────────────────────
   function handleDisconnect() {
     clearToken()
     clearPrimaryBudgetId()
@@ -61,21 +93,41 @@ export default function App() {
     setStep('token')
   }
 
-  // ── Filters step ────────────────────────────────────────────────────────────
-  function handleContinueToFilters() {
-    setStep('filters')
+  // ── Source mode selection ─────────────────────────────────────────────────
+  function handleSourceModeSelect(mode: SourceMode) {
+    setSourceMode(mode)
+    if (mode === 'csv') {
+      setStep('csv_upload')
+    } else {
+      setStep('filters')
+    }
   }
 
-  // ── Preflight step ──────────────────────────────────────────────────────────
+  // ── CSV upload ───────────────────────────────────────────────────────────────
+  function handleCsvParsed(transactions: CsvTransaction[], accounts: string[]) {
+    setCsvTransactions(transactions)
+    setCsvAccounts(accounts)
+    setCsvFiltersState({
+      startDate: '2000-01-01',
+      endDate: today(),
+      selectedAccountNames: accounts,
+    })
+    setStep('csv_filters')
+  }
+
+  // ── Preflight ────────────────────────────────────────────────────────────────
   function handleRunPreflight() {
-    setStep('preflight')
+    if (sourceMode === 'csv') {
+      setStep('csv_preflight')
+    } else {
+      setStep('preflight')
+    }
   }
 
-  // ── Clone ───────────────────────────────────────────────────────────────────
+  // ── Clone (API) ──────────────────────────────────────────────────────────────
   async function handleClone(_preflightResult: PreflightResult) {
     setCloneProgress({ done: 0, total: 0 })
     setStep('cloning')
-
     try {
       const result = await cloneTransactions(
         token,
@@ -88,38 +140,52 @@ export default function App() {
       setCloneResult(result)
       setStep('result')
     } catch (err) {
-      // Shouldn't normally reach here since cloneTransactions catches per-batch errors,
-      // but handle catastrophic failures gracefully
       const message = err instanceof Error ? err.message : String(err)
-      setCloneResult({
+      setCloneResult({ dryRun, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), copied: 0, skipped: 0, errors: 1, transactions: [{ sourceTransactionId: 'N/A', status: 'error', reason: message }] })
+      setStep('result')
+    }
+  }
+
+  // ── Clone (CSV) ──────────────────────────────────────────────────────────────
+  async function handleCsvClone(_preflightResult: PreflightResult) {
+    setCloneProgress({ done: 0, total: 0 })
+    setStep('cloning')
+    try {
+      const result = await cloneFromCsv(
+        token,
+        destBudgetId,
+        csvTransactions,
+        csvFilters,
         dryRun,
-        startedAt: new Date().toISOString(),
-        finishedAt: new Date().toISOString(),
-        copied: 0,
-        skipped: 0,
-        errors: 1,
-        transactions: [{ sourceTransactionId: 'N/A', status: 'error', reason: message }],
-      })
+        (done, total) => setCloneProgress({ done, total }),
+      )
+      setCloneResult(result)
+      setStep('result')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setCloneResult({ dryRun, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), copied: 0, skipped: 0, errors: 1, transactions: [{ sourceTransactionId: 'N/A', status: 'error', reason: message }] })
       setStep('result')
     }
   }
 
   // ── Start over ───────────────────────────────────────────────────────────────
   function handleStartOver() {
-    setSourceBudgetId('')
+    setSourceBudgetId(primaryBudgetId ?? '')
     setDestBudgetId('')
     setFiltersState(getFilters())
+    setCsvTransactions([])
+    setCsvAccounts([])
+    setCsvFiltersState(DEFAULT_CSV_FILTERS)
     setDryRun(false)
     setCloneResult(null)
+    setSourceMode('api')
     setStep('budgets')
   }
 
   // ── Render ───────────────────────────────────────────────────────────────────
-  const sourceBudgetName = budgets.find((b) => b.id === sourceBudgetId)?.name ?? sourceBudgetId
+  const sourceBudgetName = budgets.find((b) => b.id === sourceBudgetId)?.name ?? (sourceMode === 'csv' ? 'CSV Export' : sourceBudgetId)
   const destBudgetName = budgets.find((b) => b.id === destBudgetId)?.name ?? destBudgetId
-  
-  // If we have a saved token but budgets haven't been loaded yet (e.g. page refresh),
-  // show the token step to re-authenticate instead of crashing.
+
   let content = null
   if (step === 'budgets' && budgets.length === 0) {
     content = <TokenStep initialToken={token} onSuccess={handleTokenSuccess} />
@@ -143,9 +209,20 @@ export default function App() {
             destBudgetId={destBudgetId}
             onSourceChange={setSourceBudgetId}
             onDestChange={setDestBudgetId}
-            onContinue={handleContinueToFilters}
+            onContinue={() => setStep('source_mode')}
             onDisconnect={handleDisconnect}
             onChangePrimary={() => setStep('primary_budget')}
+          />
+        )
+        break
+      case 'source_mode':
+        content = <SourceModeStep onSelect={handleSourceModeSelect} />
+        break
+      case 'csv_upload':
+        content = (
+          <CsvUploadStep
+            onParsed={handleCsvParsed}
+            onBack={() => setStep('source_mode')}
           />
         )
         break
@@ -159,7 +236,20 @@ export default function App() {
             onFiltersChange={setFiltersState}
             onDryRunChange={setDryRun}
             onRunPreflight={handleRunPreflight}
-            onBack={() => setStep('budgets')}
+            onBack={() => setStep('source_mode')}
+          />
+        )
+        break
+      case 'csv_filters':
+        content = (
+          <CsvFiltersStep
+            accounts={csvAccounts}
+            filters={csvFilters}
+            dryRun={dryRun}
+            onFiltersChange={setCsvFiltersState}
+            onDryRunChange={setDryRun}
+            onRunPreflight={handleRunPreflight}
+            onBack={() => setStep('csv_upload')}
           />
         )
         break
@@ -173,6 +263,19 @@ export default function App() {
             dryRun={dryRun}
             onClone={handleClone}
             onBack={() => setStep('filters')}
+          />
+        )
+        break
+      case 'csv_preflight':
+        content = (
+          <CsvPreflightStep
+            token={token}
+            destBudgetId={destBudgetId}
+            csvTransactions={csvTransactions}
+            filters={csvFilters}
+            dryRun={dryRun}
+            onClone={handleCsvClone}
+            onBack={() => setStep('csv_filters')}
           />
         )
         break

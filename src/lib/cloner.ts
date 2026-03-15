@@ -761,3 +761,339 @@ export async function cloneTransactions(
     transactions: results,
   }
 }
+
+// ─── CSV-based preflight ──────────────────────────────────────────────────────
+
+import type { CsvFilterPreferences } from './types'
+import type { CsvTransaction } from './csvParser'
+
+/**
+ * Run a preflight check against the destination budget using transactions
+ * sourced from a YNAB CSV export instead of the live API.
+ */
+export async function preflightFromCsv(
+  token: string,
+  destBudgetId: string,
+  csvTransactions: CsvTransaction[],
+  filters: CsvFilterPreferences,
+): Promise<PreflightResult> {
+  const client = makeClient(token)
+
+  const [destAccountsResp, destCatsResp, destPayeesResp] = await Promise.all([
+    client.accounts.getAccounts(destBudgetId),
+    client.categories.getCategories(destBudgetId),
+    client.payees.getPayees(destBudgetId),
+  ])
+
+  const destAccountMap = buildAccountNameMap(destAccountsResp.data.accounts)
+  const destCategoryMap = buildCategoryNameMap(destCatsResp.data.category_groups)
+
+  const destTransferPayeeByAccountName = new Map<string, string>()
+  for (const p of destPayeesResp.data.payees) {
+    if (p.transfer_account_id && !p.deleted) {
+      const destAcct = destAccountsResp.data.accounts.find(a => a.id === p.transfer_account_id)
+      if (destAcct) {
+        destTransferPayeeByAccountName.set(destAcct.name.trim().toLowerCase(), p.id)
+      }
+    }
+  }
+
+  // Apply date and account filters
+  const selectedNames = filters.selectedAccountNames
+  const filtered = csvTransactions.filter(tx => {
+    if (tx.date < filters.startDate || tx.date > filters.endDate) return false
+    if (selectedNames && !selectedNames.includes(tx.account)) return false
+    return true
+  })
+
+  // Build account matches
+  const accountNameSet = new Set(filtered.map(t => t.account))
+  const accountMatches: AccountMatch[] = Array.from(accountNameSet).map(name => {
+    const dest = destAccountMap.get(name.trim().toLowerCase())
+    return {
+      sourceAccountId: name,
+      sourceAccountName: name,
+      destinationAccountId: dest?.id ?? null,
+      destinationAccountName: dest?.name ?? null,
+      transactionCount: filtered.filter(t => t.account === name).length,
+    }
+  })
+
+  const matchedAccountNames = new Set(
+    accountMatches.filter(m => m.destinationAccountId !== null).map(m => m.sourceAccountName),
+  )
+
+  // Build category matches
+  const catKeySet = new Set<string>()
+  const categoryMatches: CategoryMatch[] = []
+  for (const tx of filtered) {
+    if (!tx.category || !tx.categoryGroup) continue
+    if (tx.isTransfer) continue
+    const key = `${tx.categoryGroup.trim().toLowerCase()}/${tx.category.trim().toLowerCase()}`
+    if (catKeySet.has(key)) continue
+    catKeySet.add(key)
+    const dest = matchCategory(tx.categoryGroup, tx.category, destCategoryMap)
+    categoryMatches.push({
+      sourceCategoryId: key,
+      sourceCategoryName: tx.category,
+      sourceGroupName: tx.categoryGroup,
+      destinationCategoryId: dest?.id ?? null,
+      destinationCategoryName: dest?.name ?? null,
+    })
+  }
+
+  const matchedCatKeys = new Set(
+    categoryMatches.filter(m => m.destinationCategoryId !== null).map(m =>
+      `${m.sourceGroupName.trim().toLowerCase()}/${m.sourceCategoryName.trim().toLowerCase()}`
+    ),
+  )
+
+  // Transfer payee matches
+  const transferPayeeMatches: import('./types').TransferPayeeMatch[] = Array.from(accountNameSet).map(name => {
+    const pId = destTransferPayeeByAccountName.get(name.trim().toLowerCase())
+    return {
+      sourceAccountId: name,
+      sourceAccountName: name,
+      destinationTransferPayeeId: pId ?? null,
+    }
+  })
+
+  // Count will-copy / will-skip
+  let willCopyCount = 0
+  let willSkipCount = 0
+  let transferCount = 0
+  const skipMap = new Map<string, SkippedSummary>()
+
+  // Track which transfer pairs we've already counted to avoid double-counting
+  const seenTransferKeys = new Set<string>()
+
+  for (const tx of filtered) {
+    if (!matchedAccountNames.has(tx.account)) {
+      willSkipCount++
+      const key = `no_account:${tx.account}`
+      const existing = skipMap.get(key)
+      if (existing) existing.count++
+      else skipMap.set(key, { reason: 'no_account_match', accountName: tx.account, categoryName: '', count: 1 })
+      continue
+    }
+
+    // For transfers, check if it's the "outflow" side and we already counted the pair
+    if (tx.isTransfer && tx.transferToAccount) {
+      const pairKey = [tx.account, tx.transferToAccount].sort().join('|') + '|' + tx.date + '|' + tx.amount
+      if (seenTransferKeys.has(pairKey)) continue
+      seenTransferKeys.add(pairKey)
+      transferCount++
+      willCopyCount++
+      continue
+    }
+
+    // Non-transfer: check category match
+    if (tx.category && tx.categoryGroup) {
+      const key = `${tx.categoryGroup.trim().toLowerCase()}/${tx.category.trim().toLowerCase()}`
+      if (!matchedCatKeys.has(key)) {
+        willSkipCount++
+        const existing = skipMap.get(key)
+        if (existing) existing.count++
+        else skipMap.set(key, { reason: 'no_category_match', accountName: tx.account, categoryName: tx.category, count: 1 })
+        continue
+      }
+    }
+
+    willCopyCount++
+  }
+
+  return {
+    accountMatches,
+    categoryMatches,
+    transferPayeeMatches,
+    willCopyCount,
+    transferCount,
+    willSkipCount,
+    skippedTransactionSummary: Array.from(skipMap.values()),
+  }
+}
+
+// ─── CSV-based clone ──────────────────────────────────────────────────────────
+
+/** Batch size for POSTing — identical to API clone path. */
+const CSV_BATCH_SIZE = 50
+
+/**
+ * Clone transactions from a parsed YNAB CSV export to a destination budget.
+ */
+export async function cloneFromCsv(
+  token: string,
+  destBudgetId: string,
+  csvTransactions: CsvTransaction[],
+  filters: CsvFilterPreferences,
+  dryRun: boolean,
+  onProgress?: (done: number, total: number) => void,
+): Promise<CloneResult> {
+  const startedAt = new Date().toISOString()
+  const client = makeClient(token)
+
+  const [destAccountsResp, destCatsResp, destPayeesResp] = await Promise.all([
+    client.accounts.getAccounts(destBudgetId),
+    client.categories.getCategories(destBudgetId),
+    client.payees.getPayees(destBudgetId),
+  ])
+
+  const destAccountMap = buildAccountNameMap(destAccountsResp.data.accounts)
+  const destCategoryMap = buildCategoryNameMap(destCatsResp.data.category_groups)
+
+  // Build transfer payee lookup: dest account name → transfer payee ID
+  const destTransferPayeeByAccountName = new Map<string, string>()
+  for (const p of destPayeesResp.data.payees) {
+    if (p.transfer_account_id && !p.deleted) {
+      const destAcct = destAccountsResp.data.accounts.find(a => a.id === p.transfer_account_id)
+      if (destAcct) {
+        destTransferPayeeByAccountName.set(destAcct.name.trim().toLowerCase(), p.id)
+      }
+    }
+  }
+
+  // Apply date and account filters
+  const selectedNames = filters.selectedAccountNames
+  const eligible = csvTransactions.filter(tx => {
+    if (tx.date < filters.startDate || tx.date > filters.endDate) return false
+    if (selectedNames && !selectedNames.includes(tx.account)) return false
+    return true
+  })
+
+  const results: TransactionResult[] = []
+  const skippedResults: TransactionResult[] = []
+  const toPost: Array<{ payload: TransactionToPost; sourceId: string }> = []
+
+  // Track handled transfer pairs to avoid double-posting
+  // Key: sorted pair of accountName + date + absolute amount
+  const handledTransferKeys = new Set<string>()
+
+  for (let i = 0; i < eligible.length; i++) {
+    const tx = eligible[i]
+    const sourceId = `csv-${i}`
+
+    // Resolve destination account
+    const destAcct = destAccountMap.get(tx.account.trim().toLowerCase())
+    if (!destAcct) {
+      skippedResults.push({ sourceTransactionId: sourceId, status: 'skipped', reason: `No destination account match for "${tx.account}"` })
+      continue
+    }
+
+    // Handle transfer pairs deduplication
+    if (tx.isTransfer && tx.transferToAccount) {
+      const pairKey = [tx.account, tx.transferToAccount].sort().join('|') + '|' + tx.date + '|' + Math.abs(tx.amount)
+      if (handledTransferKeys.has(pairKey)) {
+        // Sister already posted — record as copied
+        results.push({ sourceTransactionId: sourceId, status: 'copied' })
+        continue
+      }
+      handledTransferKeys.add(pairKey)
+
+      // Try to resolve native transfer payee
+      const pId = destTransferPayeeByAccountName.get(tx.transferToAccount.trim().toLowerCase())
+      const payload: TransactionToPost = {
+        account_id: destAcct.id,
+        date: tx.date,
+        amount: tx.amount,
+        payee_name: pId ? null : sanitizePayeeName(tx.payee),
+        ...(pId ? { payee_id: pId } : {}),
+        category_id: null,
+        memo: tx.memo ?? null,
+        cleared: tx.cleared,
+        approved: true,
+        flag_color: null,
+      }
+      toPost.push({ payload, sourceId })
+      continue
+    }
+
+    // Resolve category
+    let destCategoryId: string | null = null
+    if (tx.category && tx.categoryGroup) {
+      const dest = matchCategory(tx.categoryGroup, tx.category, destCategoryMap)
+      if (!dest) {
+        skippedResults.push({ sourceTransactionId: sourceId, status: 'skipped', reason: `No destination category match for "${tx.category}"` })
+        continue
+      }
+      destCategoryId = dest.id
+    }
+
+    const payload: TransactionToPost = {
+      account_id: destAcct.id,
+      date: tx.date,
+      amount: tx.amount,
+      payee_name: sanitizePayeeName(tx.payee),
+      category_id: destCategoryId,
+      memo: tx.memo ?? null,
+      cleared: tx.cleared,
+      approved: true,
+      flag_color: null,
+    }
+    toPost.push({ payload, sourceId })
+  }
+
+  const total = toPost.length + skippedResults.length
+  onProgress?.(skippedResults.length, total)
+
+  if (dryRun) {
+    const finishedAt = new Date().toISOString()
+    return {
+      dryRun,
+      startedAt,
+      finishedAt,
+      copied: toPost.length,
+      skipped: skippedResults.length,
+      errors: 0,
+      transactions: [
+        ...toPost.map(({ sourceId }) => ({ sourceTransactionId: sourceId, status: 'copied' as const })),
+        ...skippedResults,
+      ],
+    }
+  }
+
+  // POST in batches
+  for (let batchStart = 0; batchStart < toPost.length; batchStart += CSV_BATCH_SIZE) {
+    const batch = toPost.slice(batchStart, batchStart + CSV_BATCH_SIZE)
+    try {
+      const resp = await client.transactions.createTransactions(destBudgetId, {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        transactions: batch.map(b => b.payload) as any,
+      })
+      const created = resp.data.transactions ?? []
+      for (let j = 0; j < batch.length; j++) {
+        results.push({
+          sourceTransactionId: batch[j].sourceId,
+          status: 'copied',
+          destinationTransactionId: created[j]?.id,
+        })
+      }
+    } catch (err: unknown) {
+      let message = 'Unknown error'
+      if (err && typeof err === 'object') {
+        const e = err as Record<string, unknown>
+        if (e['error'] && typeof e['error'] === 'object') {
+          const apiErr = e['error'] as Record<string, unknown>
+          message = String(apiErr['detail'] ?? apiErr['name'] ?? message)
+        } else if (e['message']) {
+          message = String(e['message'])
+        }
+      }
+      for (const item of batch) {
+        results.push({ sourceTransactionId: item.sourceId, status: 'error', reason: message })
+      }
+    }
+    onProgress?.(results.length + skippedResults.length, total)
+  }
+
+  const finishedAt = new Date().toISOString()
+  const allResults = [...results, ...skippedResults]
+  return {
+    dryRun,
+    startedAt,
+    finishedAt,
+    copied: allResults.filter(r => r.status === 'copied').length,
+    skipped: allResults.filter(r => r.status === 'skipped').length,
+    errors: allResults.filter(r => r.status === 'error').length,
+    transactions: allResults,
+  }
+}

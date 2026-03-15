@@ -1,3 +1,7 @@
+// ─── Source mode ──────────────────────────────────────────────────────────────
+
+export type SourceMode = 'api' | 'csv'
+
 // ─── Filter preferences (persisted in localStorage) ──────────────────────────
 
 export interface FilterPreferences {
@@ -6,6 +10,14 @@ export interface FilterPreferences {
   /** Account IDs in the SOURCE budget that are selected for cloning.
    *  null means "all accounts" (initial state before accounts are loaded). */
   selectedAccountIds: string[] | null
+}
+
+/** Filter preferences for CSV mode — accounts are identified by name, not ID. */
+export interface CsvFilterPreferences {
+  startDate: string
+  endDate: string
+  /** Account names to include. null = all accounts. */
+  selectedAccountNames: string[] | null
 }
 
 // ─── Preflight diff result ────────────────────────────────────────────────────
